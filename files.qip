@@ -1,3 +1,4 @@
+set_global_assignment -name SDC_FILE c128.sdc
 set_global_assignment -name QIP_FILE rtl/sid/sid.qip
 set_global_assignment -name QIP_FILE rtl/opl3/opl3.qip
 set_global_assignment -name QIP_FILE rtl/iec_drive/iec_drive.qip
@@ -14,6 +15,7 @@ set_global_assignment -name VERILOG_FILE rtl/sdram.v
 set_global_assignment -name VHDL_FILE rtl/spram.vhd
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cartridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/reu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/am29f040.sv
 set_global_assignment -name VHDL_FILE rtl/c1530.vhd
 set_global_assignment -name VERILOG_FILE rtl/c1351.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video_switch.sv
@@ -29,4 +31,5 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/osdinfo.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/iec_io.sv
 set_global_assignment -name QIP_FILE rtl/pll_video.qip
 set_global_assignment -name QIP_FILE rtl/pll_video_cfg.qip
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/drv_overlay.sv
 set_global_assignment -name SYSTEMVERILOG_FILE c128.sv
