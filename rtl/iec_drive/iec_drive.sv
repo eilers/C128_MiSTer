@@ -25,8 +25,8 @@ module iec_drive #(parameter PARPORT=1,DRIVES=2)
    output  [N:0] led,
    output        disk_ready,
 
-   output  [N:0] out_we,
-
+   // MEGA65 port: drive-LED colour diagnostics for the 1581, see main.vhd
+   output  [9:0] dbg,
    output logic [7:0] out_track[NDR],
    output logic [N:0] out_we,
 
@@ -280,6 +280,8 @@ c1581_multi #(.PARPORT(PARPORT), .DRIVES(DRIVES)) c1581
    .sd_buff_wr(sd_buff_wr),
    .out_track(c1581_out_track),
    .out_we(c1581_out_we),
+
+   .dbg(dbg)
 );
 
 endmodule
