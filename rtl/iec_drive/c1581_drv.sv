@@ -137,7 +137,7 @@ wire       side       =  pa_out[0];
 // for the same reason ("drive not ready if ready_r() is connected to CIA").
 // Report ready whenever the FDC has latched a disk; spin-up still gates
 // the FDC header path via floppy_ready.
-wire [7:0] pa_in      = {disk_chng_n, 2'b11, drive_num, 1'b1, ~dbg_present, 1'b1};
+wire [7:0] pa_in      = {disk_chng_n, 2'b11, drive_num, 1'b1, ~disk_present, 1'b1};
 
 wire       fast_dir   =  pb_out[5];
 assign     iec_clk_o  = ~pb_out[3];
@@ -248,7 +248,7 @@ wire       floppy_step;
 wire [7:0] wd_do;
 
 wire floppy_ready;
-wire dbg_present;
+wire disk_present;
 wire dbg_spinning;
 wire dbg_rd;
 wire dbg_ack;
@@ -292,7 +292,7 @@ c1581_fdc1772 #(.IMG_TYPE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
    .out_track(track_fdc),
    .out_we(out_we),
 
-   .dbg_present(dbg_present),
+   .disk_present(disk_present),
    .dbg_spinning(dbg_spinning),
    .dbg_rd(dbg_rd),
    .dbg_ack(dbg_ack),
@@ -307,7 +307,7 @@ c1581_fdc1772 #(.IMG_TYPE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 // ready chain: present -> motor on -> disk turning -> ready
 // data chain: asked for a sector -> host acked -> a full sector arrived -> sector read out
 assign dbg = {dbg_cpu, dbg_rnf, dbg_done, dbg_bytes_ok, dbg_ack, dbg_rd,
-              floppy_ready, dbg_idle, ~motor_n, dbg_present};
+              floppy_ready, dbg_idle, ~motor_n, disk_present};
 
 assign out_track = {track_fdc[6:0], 1'b0};
 

@@ -60,10 +60,11 @@ module c1581_fdc1772 (
 	output     [7:0] out_track,
 	output           out_we,
 
-	// MEGA65 port: diagnostics for the drive-LED colour code in main.vhd. floppy_ready
-	// is the AND of "a disk is in the drive" and "it has reached speed", so on its own
-	// it cannot say which of the two is missing.
-	output           dbg_present,
+	// MEGA65 port: disk_present is also the CIA /RDY sense (a disk is inserted).
+	// The remaining dbg_* ports feed the drive-LED colour code in main.vhd.
+	// floppy_ready is the AND of "a disk is in the drive" and "it has reached speed",
+	// so on its own it cannot say which of the two is missing.
+	output           disk_present,
 	output           dbg_spinning,
 	output           dbg_rd,
 	output           dbg_ack,
@@ -356,7 +357,7 @@ wire [4:0]  fd_spt         = fdn_spt[fdn];
 
 assign floppy_ready = fd_ready && fd_present;
 
-assign dbg_present  = fd_present;
+assign disk_present = fd_present;
 assign dbg_spinning = fd_spinning;
 
 // MEGA65 port: sector-data-path diagnostics for the drive-LED colour code in main.vhd.
