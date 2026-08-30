@@ -70,6 +70,11 @@ module c157x_logic #(DRIVE)
 	output [7:0] sector_gcr_din,
 
 	// MEGA65 read-only diagnostics, see the dos_diag block at the end of this file.
+	// trk_busy and trk_num are observed only: the sector GCR engine holds its bit clock
+	// in reset while a track is loading or the head is moving, so a seek that never
+	// settles stops byte-ready without any of the CPU-side signals looking wrong.
+	input        trk_busy,
+	input  [6:0] trk_num,
 	output [1919:0] dos_diag
 );
 
@@ -214,6 +219,9 @@ wire       via1_ca2_o;
 wire       via1_ca2_oe;
 wire [7:0] via1_pb_o;
 wire [7:0] via1_pb_oe;
+wire [7:0] via1_pa_i = (ext_en & ~|drv_mode ? par_data_in :
+                        {byte_n | ~|drv_mode, 6'h3F, ~tr00_sense})
+                       & (via1_pa_o | ~via1_pa_oe);
 wire [7:0] via1_pb_i = {~iec_atn_in, 2'(DRIVE), 2'b11, ~iec_clk_in, 1'b1, ~iec_data_in}
                        & (via1_pb_o | ~via1_pb_oe);
 wire       via1_cb1_o;
@@ -281,7 +289,7 @@ iecdrv_via6522 via1
 
 	.port_a_o(via1_pa_o),
 	.port_a_t(via1_pa_oe),                     
-	.port_a_i(ext_en & ~|drv_mode ? par_data_in : {byte_n | ~|drv_mode, 6'h3F, ~tr00_sense} & (via1_pa_o | ~via1_pa_oe)),
+	.port_a_i(via1_pa_i),
 
 	.port_b_o(via1_pb_o),
 	.port_b_t(via1_pb_oe),
@@ -328,7 +336,23 @@ assign sync_n = sector_gcr_enable ? sector_gcr_sync_n : h156_sync_n;
 // c157x_h156 applies SOE internally, the sector-image GCR module does not. Without this
 // gate the CPU sees byte-ready pulses while DOS has byte-ready disabled, exactly as in
 // c1541_logic.sv of the reference 1541, where cpu_so_n = byte_n | ~soe.
-assign byte_n = sector_gcr_enable ? (sector_gcr_byte_n | ~soe) : h156_byte_n;
+wire sector_byte_n_raw = sector_gcr_byte_n | ~soe;
+
+// c1541_gcr emits byte-ready as a bare pulse a fraction of a bit cell wide. That is
+// enough for the 1541, whose DOS catches it on the edge-triggered SO pin, but the 1571
+// DOS polls VIA1 PA7 instead. At 2 MHz its seven-cycle poll loop is an exact multiple of
+// the bit cell, so the sample lands on the same point of every cell and can miss the
+// pulse forever. c157x_h156 already solves this for the MFM path by holding byte-ready
+// until the CPU touches VIA2; ted is unconditionally true at 1 MHz, so the latch only
+// engages where it is needed and 1541 timing is unchanged.
+reg sector_byte_n_lat = 1;
+always @(posedge clk) begin
+	if (reset) sector_byte_n_lat <= 1;
+	else if (~sector_byte_n_raw) sector_byte_n_lat <= 0;
+	else if (ted) sector_byte_n_lat <= 1;
+end
+
+assign byte_n = sector_gcr_enable ? sector_byte_n_lat : h156_byte_n;
 
 assign     stp    = via2_pb_o[1:0] | ~via2_pb_oe[1:0];
 assign     mtr    = via2_pb_o[2]   | ~via2_pb_oe[2];
@@ -534,9 +558,38 @@ reg [7:0] eoi_entries = 0;
 reg [7:0] byte_acks = 0;
 reg [7:0] last_acr = 0;
 reg [7:0] last_ier = 0;
-reg [7:0] last_t1l = 0;
-reg [7:0] last_t1lh = 0;
-reg [7:0] t1lh_writes = 0;
+reg       raw_byte_d = 1;
+reg       gated_byte_d = 1;
+reg       sync_d = 1;
+
+// Counters that run from reset cannot distinguish "the read path worked during the
+// mount-time prefetch" from "the read path is working now", which is the only thing
+// that matters once the DOS is stuck in a polling loop. Everything below is counted
+// into a ~66 ms window and then latched, so a zero really means "not happening now".
+// Each counter saturates rather than wrapping: 255 reads as "plenty".
+reg [20:0] gcr_window = 0;
+reg [7:0] cur_raw_byte = 0, win_raw_byte = 0;
+reg [7:0] cur_gated_byte = 0, win_gated_byte = 0;
+reg [7:0] cur_ora_reads = 0, win_ora_reads = 0;
+reg [7:0] cur_sync = 0, win_sync = 0;
+// The two that separate the remaining explanations for the $180F hang: how often the
+// byte-ready pin is actually low when the DOS reads VIA1 port A, versus how often the
+// VIA hands the CPU a low bit 7 for that same read.
+reg [7:0] cur_pa7_pin = 0, win_pa7_pin = 0;
+reg [7:0] cur_pa7_cpu = 0, win_pa7_cpu = 0;
+// The two conditions that hold the sector GCR bit clock in reset. If either keeps
+// firing, byte-ready stops even though the motor, SOE and the whole CPU side look fine.
+reg [7:0] cur_busy = 0, win_busy = 0;
+reg [7:0] cur_trk_chg = 0, win_trk_chg = 0;
+reg       busy_d = 0;
+reg [6:0] trk_d = 0;
+// Total port A reads, so a zero above can be read as "the DOS never polls" rather than
+// "it polls but the bit is always high". Counted in units of 64 to survive the window.
+reg [7:0] cur_pa_rds = 0, win_pa_rds = 0;
+reg [5:0] pa_rd_div = 0;
+
+wire via1_pa_rd = ena_r & cpu_rw & via1_cs &
+                  ((cpu_a[3:0] == 4'h1) | (cpu_a[3:0] == 4'hF));
 
 always @(posedge clk) begin
 	if (reset) begin
@@ -548,11 +601,84 @@ always @(posedge clk) begin
 		byte_acks   <= 0;
 		last_acr    <= 0;
 		last_ier    <= 0;
-		last_t1l    <= 0;
-		last_t1lh   <= 0;
-		t1lh_writes <= 0;
+		raw_byte_d       <= 1;
+		gated_byte_d     <= 1;
+		sync_d           <= 1;
+		gcr_window       <= 0;
+		cur_raw_byte     <= 0;
+		win_raw_byte     <= 0;
+		cur_gated_byte   <= 0;
+		win_gated_byte   <= 0;
+		cur_ora_reads    <= 0;
+		win_ora_reads    <= 0;
+		cur_sync         <= 0;
+		win_sync         <= 0;
+		cur_pa7_pin      <= 0;
+		win_pa7_pin      <= 0;
+		cur_pa7_cpu      <= 0;
+		win_pa7_cpu      <= 0;
+		cur_busy         <= 0;
+		win_busy         <= 0;
+		cur_trk_chg      <= 0;
+		win_trk_chg      <= 0;
+		busy_d           <= 0;
+		trk_d            <= 0;
+		cur_pa_rds       <= 0;
+		win_pa_rds       <= 0;
+		pa_rd_div        <= 0;
 	end
 	else begin
+		busy_d <= trk_busy;
+		trk_d  <= trk_num;
+		raw_byte_d   <= sector_gcr_byte_n;
+		gated_byte_d <= byte_n;
+		sync_d       <= sector_gcr_sync_n;
+
+		gcr_window <= gcr_window + 1'd1;
+		if (&gcr_window) begin
+			win_raw_byte   <= cur_raw_byte;
+			win_gated_byte <= cur_gated_byte;
+			win_ora_reads  <= cur_ora_reads;
+			win_sync       <= cur_sync;
+			win_pa7_pin    <= cur_pa7_pin;
+			win_pa7_cpu    <= cur_pa7_cpu;
+			win_busy       <= cur_busy;
+			win_trk_chg    <= cur_trk_chg;
+			win_pa_rds     <= cur_pa_rds;
+			cur_busy       <= 0;
+			cur_trk_chg    <= 0;
+			cur_pa_rds     <= 0;
+			pa_rd_div      <= 0;
+			cur_raw_byte   <= 0;
+			cur_gated_byte <= 0;
+			cur_ora_reads  <= 0;
+			cur_sync       <= 0;
+			cur_pa7_pin    <= 0;
+			cur_pa7_cpu    <= 0;
+		end
+		else begin
+			if (raw_byte_d & ~sector_gcr_byte_n & ~&cur_raw_byte)
+				cur_raw_byte <= cur_raw_byte + 1'd1;
+			if (gated_byte_d & ~byte_n & ~&cur_gated_byte)
+				cur_gated_byte <= cur_gated_byte + 1'd1;
+			if (ena_r & cpu_rw & via2_cs & (cpu_a[3:0] == 4'h1) & ~&cur_ora_reads)
+				cur_ora_reads <= cur_ora_reads + 1'd1;
+			if (sync_d & ~sector_gcr_sync_n & ~&cur_sync)
+				cur_sync <= cur_sync + 1'd1;
+			if (via1_pa_rd & ~via1_pa_i[7] & ~&cur_pa7_pin)
+				cur_pa7_pin <= cur_pa7_pin + 1'd1;
+			if (via1_pa_rd & ~via1_do[7]  & ~&cur_pa7_cpu)
+				cur_pa7_cpu <= cur_pa7_cpu + 1'd1;
+			if (~busy_d & trk_busy & ~&cur_busy)
+				cur_busy <= cur_busy + 1'd1;
+			if ((trk_d != trk_num) & ~&cur_trk_chg)
+				cur_trk_chg <= cur_trk_chg + 1'd1;
+			if (via1_pa_rd) begin
+				pa_rd_div <= pa_rd_div + 1'd1;
+				if (&pa_rd_div & ~&cur_pa_rds) cur_pa_rds <= cur_pa_rds + 1'd1;
+			end
+		end
+
 		if (via1_orb_wr) orb_writes <= orb_writes + 1'd1;
 		if (irq_fetch)   irq_taken  <= irq_taken + 1'd1;
 		// Sample on ena_f: this is the phase the VIA itself uses for writes.
@@ -568,15 +694,6 @@ always @(posedge clk) begin
 		// the ATN input on VIA1; both change what a set T1 flag means.
 		if (ena_f & ~cpu_rw & via1_cs & (cpu_a[3:0] == 4'hB)) last_acr <= cpu_do;
 		if (ena_f & ~cpu_rw & via1_cs & (cpu_a[3:0] == 4'hE)) last_ier <= cpu_do;
-		// A T1 reload takes its period from the latch, not from the counter write, so a
-		// short latch makes the flag come back microseconds after every clear. $1804 and
-		// $1806 both load the low latch; $1807 loads the high latch without restarting.
-		if (ena_f & ~cpu_rw & via1_cs & ((cpu_a[3:0] == 4'h4) | (cpu_a[3:0] == 4'h6)))
-			last_t1l <= cpu_do;
-		if (ena_f & ~cpu_rw & via1_cs & (cpu_a[3:0] == 4'h7)) begin
-			last_t1lh   <= cpu_do;
-			t1lh_writes <= t1lh_writes + 1'd1;
-		end
 	end
 end
 
@@ -738,7 +855,6 @@ reg [7:0] t1_arm_age   = 8'hFF;
 reg [7:0] t1_flag_age  = 8'hFF;
 reg [7:0] t1_first_ifr = 0;
 reg       t1_armed     = 0;
-reg [7:0] ifr_reads    = 0;
 
 always @(posedge clk) begin
 	if (reset) begin
@@ -746,7 +862,6 @@ always @(posedge clk) begin
 		t1_flag_age  <= 8'hFF;
 		t1_first_ifr <= 0;
 		t1_armed     <= 0;
-		ifr_reads    <= 0;
 	end
 	else begin
 		if (via1_t1h_wr) begin
@@ -755,13 +870,10 @@ always @(posedge clk) begin
 		end
 		else if (ph2_r[0] & ~&t1_arm_age) t1_arm_age <= t1_arm_age + 1'd1;
 
-		if (via1_ifr_rd) begin
-			ifr_reads <= ifr_reads + 1'd1;
-			if (t1_armed) begin
-				t1_first_ifr <= via1_do;
-				t1_flag_age  <= t1_arm_age;
-				t1_armed     <= 0;
-			end
+		if (via1_ifr_rd && t1_armed) begin
+			t1_first_ifr <= via1_do;
+			t1_flag_age  <= t1_arm_age;
+			t1_armed     <= 0;
 		end
 	end
 end
@@ -786,9 +898,14 @@ assign dos_diag[1791:1776] = {eoi_entries, byte_acks};
 assign dos_diag[1807:1792] = {t1_first_ifr, t1_flag_age};
 assign dos_diag[1823:1808] = {last_acr, last_ier};
 assign dos_diag[1839:1824] = {4'b0, ph2f_rate};
-assign dos_diag[1855:1840] = {ifr_reads, t1lh_writes};
-assign dos_diag[1871:1856] = {last_t1lh, last_t1l};
-assign dos_diag[1919:1872] = 0;
+// The shell only transmits 128 words, so bit 1919 is the last one that ever reaches the
+// host. Everything past this point has to fit in the words below.
+assign dos_diag[1855:1840] = {win_pa7_pin, win_pa7_cpu};
+assign dos_diag[1871:1856] = {win_pa_rds, win_trk_chg};
+assign dos_diag[1887:1872] = {win_raw_byte, win_gated_byte};
+assign dos_diag[1903:1888] = {win_ora_reads, 1'b0, trk_num};
+assign dos_diag[1919:1904] = {win_sync, 2'b0, trk_busy, wgate,
+                              sector_gcr_byte_n, byte_n, soe, mtr};
 
 // Word order matches the order the shell prints them, lowest word first.
 assign dos_diag[15:0]    = 16'hD05A;               // signature

@@ -246,6 +246,8 @@ c157x_logic #(.DRIVE(DRIVE)) c157x_logic
 	.sector_gcr_sync_n(sector_gcr_sync_n),
 	.sector_gcr_byte_n(sector_gcr_byte_n),
 	.sector_gcr_din(sector_gcr_di),
+	.trk_busy(busy),
+	.trk_num(track_num),
 	.dos_diag(dos_diag)
 );
 
