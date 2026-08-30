@@ -113,15 +113,20 @@ T65 cpu
 );
 
 wire [7:0] ram_do;
-iecdrv_mem #(8,13) ram
+iecdrv_mem #(.DATAWIDTH(8), .ADDRWIDTH(13), .WRITE_B(0)) ram
 (
    .clock_a(clk),
    .address_a(cpu_a[12:0]),
    .data_a(cpu_do),
    .wren_a(ph2_f & ~cpu_rw & ram_cs),
 
+   // MEGA65 port: port B only ever reads. Leaving wren_b/data_b unconnected makes Vivado
+   // infer a true dual-port RAM whose two write ports share one address, reported as
+   // [Synth 8-5796], with undefined collision behaviour. Tie them off.
    .clock_b(clk),
    .address_b(cpu_a[12:0]),
+   .data_b(8'h00),
+   .wren_b(1'b0),
    .q_b(ram_do)
 );
 

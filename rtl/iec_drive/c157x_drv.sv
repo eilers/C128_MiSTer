@@ -81,22 +81,31 @@ module c157x_drv #(parameter DRIVE)
 	input  [15:0] sd_buff_addr,
 	input   [7:0] sd_buff_dout,
 	output  [7:0] sd_buff_din,
-	input         sd_buff_wr
+	input         sd_buff_wr,
+
+	// MEGA65 read-only diagnostics. Words 0-7 are the host-side handshake, sampled in
+	// clk_sys; words 8-15 are DOS state and words 16-63 the serial-bus trace, both from
+	// c157x_logic and sampled in clk. Words 64-111 hold bit-count / VIA1 T1 samples.
+	output logic [2047:0] diag
 );
 
 localparam SD_BLK_CNT_1541 = 31;
 localparam SD_BLK_CNT_157X = 52;
 
-assign sd_blk_cnt = 6'(|drv_mode ? SD_BLK_CNT_157X : SD_BLK_CNT_1541);
+// The physical drive LED is controlled by VIA2 PB3, just like the real drive.
+// sd_busy is only a host-buffer handshake and must not fill DOS error-blink gaps.
+assign led = act;
 
-assign led = act | sd_busy;
-
+// MEGA65 port: old_mounted and present lived inside the always block. Vivado infers
+// registers for those, xsim re-initialises them on every invocation, so the mount edge
+// is never detected and the drive never sees a disk. See iecdrv_rom.sv for the same
+// trap. ch_timeout also needs its initialiser, or an X there swallows the timeout.
 reg        readonly = 0;
 reg        disk_present = 0;
-reg [24:0] ch_timeout;
+reg [24:0] ch_timeout = 0;
+reg        old_mounted = 0;
+reg        present = 0;
 always @(posedge clk) begin
-	reg old_mounted;
-	reg present = 0;
 
 	if(ce && ch_timeout > 0) ch_timeout <= ch_timeout - 1'd1;
 	if(!ch_timeout) disk_present <= present;
@@ -111,11 +120,12 @@ always @(posedge clk) begin
 	end
 end
 
-// reset drive when drive mode changes
-reg reset_drv;
+// reset drive when drive mode changes. The drive powers up held in reset, which is
+// also what the FPGA does: reset is high until the M2M Shell reports a mounted image.
+reg reset_drv = 1;
+reg [1:0] last_drv_mode = 0;
+reg [3:0] reset_hold = 0;
 always @(posedge clk) begin
-	reg [1:0] last_drv_mode;
-	reg [3:0] reset_hold;
 
 	if (reset) begin
 		last_drv_mode <= drv_mode;
@@ -151,7 +161,27 @@ wire       side;
 wire       busy;
 reg  [7:0] track;
 reg        save_track = 0;
+reg        track_modified = 0;
+reg  [6:0] track_num = 36;
+reg  [1:0] move = 0, stp_old = 0;
+reg        side_old = 0;
 wire       drive_enable = disk_present & mtr;
+wire       sector_mode = img_gcr & ~img_mfm;
+// A head bump can step past track 35. The linear sector table only covers a real disk,
+// so clamp before adding the side offset instead of addressing past the end of a D64/D71.
+wire [6:0] sector_track_raw = {1'b0, track_num[6:1]} + 7'd1;
+wire [6:0] sector_track = (sector_track_raw > 7'd35 ? 7'd35 : sector_track_raw) +
+                          ((img_ds & side) ? 7'd35 : 7'd0);
+wire [5:0] raw_blk_cnt = 6'(|drv_mode ? SD_BLK_CNT_157X : SD_BLK_CNT_1541);
+
+wire [7:0] sector_gcr_do, sector_gcr_di, sector_sd_buff_din;
+wire       sector_gcr_sync_n, sector_gcr_byte_n, sector_gcr_we;
+wire [7:0] heads_sd_buff_din;
+
+// Crosses from clk into the QNICE read without a synchroniser. Individual words can
+// therefore be skewed against each other, which is harmless: every field is either a
+// slowly changing mirror or a counter read for its trend, never for an exact value.
+wire [1919:0] dos_diag;
 
 c157x_logic #(.DRIVE(DRIVE)) c157x_logic
 (
@@ -210,7 +240,13 @@ c157x_logic #(.DRIVE(DRIVE)) c157x_logic
 	.drive_enable(drive_enable),
 	.disk_present(disk_present),
 
-	.img_mfm(img_mfm)
+	.img_mfm(img_mfm),
+	.sector_gcr_enable(sector_mode),
+	.sector_gcr_dout(sector_gcr_do),
+	.sector_gcr_sync_n(sector_gcr_sync_n),
+	.sector_gcr_byte_n(sector_gcr_byte_n),
+	.sector_gcr_din(sector_gcr_di),
+	.dos_diag(dos_diag)
 );
 
 // wire  [7:0] gcr_di;
@@ -277,12 +313,36 @@ iecdrv_sync busy_sync(clk, busy, sd_busy);
 // 	.sd_buff_wr(sd_ack & sd_buff_wr /*& gcr_mode*/)
 // );
 
+c1541_gcr sector_gcr
+(
+	.clk(clk),
+	.ce(ce & sector_mode),
+	.dout(sector_gcr_do),
+	.din(sector_gcr_di),
+	.mode(mode),
+	.mtr(mtr),
+	.freq(freq),
+	.sync_n(sector_gcr_sync_n),
+	.byte_n(sector_gcr_byte_n),
+	.track(sector_track),
+	.busy(sd_busy | ~disk_present),
+	.we(sector_gcr_we),
+	.sd_clk(clk_sys),
+	.sd_lba(sd_lba),
+	.sd_buff_addr(sd_buff_addr[12:0]),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sector_sd_buff_din),
+	.sd_buff_wr(sd_ack & sd_buff_wr & sector_mode)
+);
+
+assign sd_buff_din = sector_mode ? sector_sd_buff_din : heads_sd_buff_din;
+
 c157x_heads #(.DRIVE(DRIVE), .TRACK_BUF_LEN(SD_BLK_CNT_157X*256)) c157x_heads
 (
 	.clk(clk),
 	.ce(ce),
 	.reset(reset_drv),
-	.enable(drive_enable),
+	.enable(drive_enable & ~sector_mode),
 	.img_ds(img_ds),
 	.img_gcr(img_gcr),
 	.img_mfm(img_mfm),
@@ -304,8 +364,8 @@ c157x_heads #(.DRIVE(DRIVE), .TRACK_BUF_LEN(SD_BLK_CNT_157X*256)) c157x_heads
 	.sd_clk(clk_sys),
 	.sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din(sd_buff_din),
-	.sd_buff_wr(sd_ack & sd_buff_wr),
+	.sd_buff_din(heads_sd_buff_din),
+	.sd_buff_wr(sd_ack & sd_buff_wr & ~sector_mode),
 	.sd_update(sd_update)
 );
 
@@ -315,22 +375,21 @@ c157x_track c157x_track
 	.reset(reset_drv),
 
 	.sd_lba(sd_lba),
+	.sd_blk_cnt(sd_blk_cnt),
 	.sd_rd(sd_rd),
 	.sd_wr(sd_wr),
 	.sd_ack(sd_ack),
 
 	.freq(freq),
+	.sector_mode(sector_mode),
+	.sector_track(sector_track),
+	.raw_blk_cnt(raw_blk_cnt),
 
 	.save_track(save_track),
 	.change(img_mounted),
 	.track(track),
 	.busy(busy)
 );
-
-reg       track_modified = 0;
-reg [6:0] track_num = 36;
-reg [1:0] move = 0, stp_old = 0;
-reg       side_old = 0;
 
 always @(posedge clk) begin
 	track <= track_num + (side ? 8'd84 : 8'd0);
@@ -339,7 +398,7 @@ always @(posedge clk) begin
 	stp_old <= stp;
 	move <= stp - stp_old;
 
-	if (sd_update)   track_modified <= 1;
+	if (sector_mode ? sector_gcr_we : sd_update) track_modified <= 1;
 	if (img_mounted) track_modified <= 0;
 
 	if (reset_drv) begin
@@ -365,5 +424,44 @@ end
 
 assign out_track = track;
 assign out_we = track_modified | sd_wr;
+
+// The diagnostic words are deliberately compact and stable enough to inspect through
+// the QNICE monitor. Event counters make short requests visible without an LED or ILA.
+reg [7:0] diag_rd_count = 0;
+reg [7:0] diag_wr_count = 0;
+reg [7:0] diag_ack_count = 0;
+reg       diag_rd_d = 0;
+reg       diag_wr_d = 0;
+reg       diag_ack_d = 0;
+always @(posedge clk_sys) begin
+	diag_rd_d  <= sd_rd;
+	diag_wr_d  <= sd_wr;
+	diag_ack_d <= sd_ack;
+	if (reset) begin
+		diag_rd_count  <= 0;
+		diag_wr_count  <= 0;
+		diag_ack_count <= 0;
+	end else begin
+		if (sd_rd  & ~diag_rd_d)  diag_rd_count  <= diag_rd_count + 1'd1;
+		if (sd_wr  & ~diag_wr_d)  diag_wr_count  <= diag_wr_count + 1'd1;
+		if (sd_ack & ~diag_ack_d) diag_ack_count <= diag_ack_count + 1'd1;
+	end
+end
+
+always_comb begin
+	diag = '0;
+	diag[15:0]   = 16'h157D; // format/version signature
+	diag[31:16]  = {img_ds, img_gcr, img_mfm, img_readonly, disk_present,
+	                 mtr, act, sd_busy, sd_rd, sd_wr, sd_ack, mode, side,
+	                 drv_mode, reset_drv};
+	diag[47:32]  = {track, sd_buff_addr[7:0]};
+	diag[63:48]  = {diag_rd_count, diag_wr_count};
+	diag[95:64]  = sd_lba;
+	diag[111:96] = {2'b00, sd_blk_cnt, diag_ack_count};
+	// A changing ROM address proves that the drive CPU left reset and is executing
+	// DOS. reset_drv and all host handshakes are already present in the lower words.
+	diag[127:112]= {1'b0, rom_addr};
+	diag[2047:128]= dos_diag;
+end
 
 endmodule
