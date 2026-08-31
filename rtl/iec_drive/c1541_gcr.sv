@@ -56,6 +56,8 @@ reg [5:0] sync_cnt = 0;
 reg [7:0] gcr_byte = 0;
 reg [2:0] bit_cnt = 0;
 reg [3:0] gcr_bit_cnt = 0;
+reg [5:0] write_ones = 0;
+reg write_aligned = 0;
 
 // Preserve the original sector generator's header-to-data layout.
 localparam [8:0] HEADER_TO_DATA_BYTES = 9'd16;
@@ -146,6 +148,8 @@ always @(posedge clk) begin
 				byte_cnt <= 0;
 				nibble <= 0;
 				gcr_bit_cnt <= 0;
+				write_ones <= 0;
+				write_aligned <= 0;
 				bit_cnt <= 0;
 				gcr_byte <= 0;
 				data_cks <= 0;
@@ -168,25 +172,48 @@ always @(posedge clk) begin
 				sync_in_n <= 1;
 			end
 		end else begin
-			gcr_bit_cnt <= gcr_bit_cnt + 1'b1;
-			if (gcr_bit_cnt == 4) begin
-				gcr_bit_cnt <= 0;
-				if (nibble) begin
+			// The write gate can open at any phase of the byte already in the VIA
+			// shift register. At 1 MHz the discarded prefix happened to align the
+			// following GCR stream; at 2 MHz it did not, so the $07 data marker was
+			// never decoded. A real drive establishes framing from the run of sync
+			// one-bits. Do the same: after at least four $FF bytes, make the first
+			// zero bit the first bit of a five-bit GCR code.
+			if (~mode && ~write_aligned) begin
+				if (gcr_byte_out[~bit_cnt]) begin
+					if (~&write_ones) write_ones <= write_ones + 1'b1;
+				end else if (write_ones >= 32) begin
+					write_aligned <= 1;
+					write_ones <= 0;
+					gcr_bit_cnt <= 1;
+					gcr_nibble_out <= 0;
 					nibble <= 0;
-					buff_addr <= {sector,byte_cnt[7:0]};
-					if (!byte_cnt) data_cks <= 0;
-					else data_cks <= data_cks ^ data;
-					if (mode | autorise_count) byte_cnt <= byte_cnt + 1'b1;
+					byte_cnt <= 0;
+					data_cks <= 0;
+					decode_error <= 0;
 				end else begin
-					nibble <= 1;
-					if (~mode && buff_di == 'h07) begin
-						autorise_write <= 1;
-						autorise_count <= 1;
-						decode_error <= 0;
-					end
-					if (byte_cnt[8]) begin
-						autorise_write <= 0;
-						autorise_count <= 0;
+					write_ones <= 0;
+				end
+			end else begin
+				gcr_bit_cnt <= gcr_bit_cnt + 1'b1;
+				if (gcr_bit_cnt == 4) begin
+					gcr_bit_cnt <= 0;
+					if (nibble) begin
+						nibble <= 0;
+						buff_addr <= {sector,byte_cnt[7:0]};
+						if (!byte_cnt) data_cks <= 0;
+						else data_cks <= data_cks ^ data;
+						if (mode | autorise_count) byte_cnt <= byte_cnt + 1'b1;
+					end else begin
+						nibble <= 1;
+						if (~mode && buff_di == 'h07) begin
+							autorise_write <= 1;
+							autorise_count <= 1;
+							decode_error <= 0;
+						end
+						if (byte_cnt[8]) begin
+							autorise_write <= 0;
+							autorise_count <= 0;
+						end
 					end
 				end
 			end
@@ -214,13 +241,16 @@ always @(posedge clk) begin
 			// bit 0 first would mirror every five-bit code, which no DOS can decode.
 			gcr_byte <= {gcr_byte[6:0], gcr_nibble[gcr_bit_index]};
 			if (bit_cnt == 7) dout <= {gcr_byte[6:0], gcr_nibble[gcr_bit_index]};
-			gcr_nibble_out <= {gcr_nibble_out[3:0], gcr_byte_out[~bit_cnt]};
-			if (!gcr_bit_cnt) begin
-				if (~mode && autorise_write && ~decode_valid) decode_error <= 1;
-				if (nibble) buff_di[7:4] <= nibble_out;
-				else buff_di[3:0] <= nibble_out;
+			if (mode | write_aligned) begin
+				gcr_nibble_out <= {gcr_nibble_out[3:0], gcr_byte_out[~bit_cnt]};
+				if (!gcr_bit_cnt) begin
+					if (~mode && autorise_write && ~decode_valid) decode_error <= 1;
+					if (nibble) buff_di[7:4] <= nibble_out;
+					else buff_di[3:0] <= nibble_out;
+				end
+				if (gcr_bit_cnt == 1 && ~nibble && autorise_write && ~decode_error)
+					we <= 1;
 			end
-			if (gcr_bit_cnt == 1 && ~nibble && autorise_write && ~decode_error) we <= 1;
 		end
 	end
 end

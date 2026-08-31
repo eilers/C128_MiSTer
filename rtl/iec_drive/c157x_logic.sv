@@ -130,7 +130,7 @@ wire        cpu_irq_n = ~(via1_irq | via2_irq) & cia_irq_n;
 // read head delivers to VIA2 port A, so truncating it to one bit meant the 1541/1571
 // could never read anything off a disk.
 wire [7:0] gcr_do;
-wire       sync_n, byte_n, dgcr_we;
+wire       sync_n, byte_n, byte_n_poll, dgcr_we;
 wire       gcr_ht, gcr_hinit;
 wire [7:0] h156_do;
 wire       h156_sync_n, h156_byte_n;
@@ -219,8 +219,11 @@ wire       via1_ca2_o;
 wire       via1_ca2_oe;
 wire [7:0] via1_pb_o;
 wire [7:0] via1_pb_oe;
+// PA7 is BYTE READY as a level the 1571 DOS polls, not as an edge; byte_n_poll is the
+// stretched version built further down. In 1541 mode drv_mode is zero and this bit is
+// forced high, so the stretch is invisible there.
 wire [7:0] via1_pa_i = (ext_en & ~|drv_mode ? par_data_in :
-                        {byte_n | ~|drv_mode, 6'h3F, ~tr00_sense})
+                        {byte_n_poll | ~|drv_mode, 6'h3F, ~tr00_sense})
                        & (via1_pa_o | ~via1_pa_oe);
 wire [7:0] via1_pb_i = {~iec_atn_in, 2'(DRIVE), 2'b11, ~iec_clk_in, 1'b1, ~iec_data_in}
                        & (via1_pb_o | ~via1_pb_oe);
@@ -338,21 +341,52 @@ assign sync_n = sector_gcr_enable ? sector_gcr_sync_n : h156_sync_n;
 // c1541_logic.sv of the reference 1541, where cpu_so_n = byte_n | ~soe.
 wire sector_byte_n_raw = sector_gcr_byte_n | ~soe;
 
-// c1541_gcr emits byte-ready as a bare pulse a fraction of a bit cell wide. That is
-// enough for the 1541, whose DOS catches it on the edge-triggered SO pin, but the 1571
-// DOS polls VIA1 PA7 instead. At 2 MHz its seven-cycle poll loop is an exact multiple of
-// the bit cell, so the sample lands on the same point of every cell and can miss the
-// pulse forever. c157x_h156 already solves this for the MFM path by holding byte-ready
-// until the CPU touches VIA2; ted is unconditionally true at 1 MHz, so the latch only
-// engages where it is needed and 1541 timing is unchanged.
-reg sector_byte_n_lat = 1;
+// BYTE READY has two consumers with opposite requirements, and one signal cannot serve
+// both. The CPU's SO pin is edge-triggered: the disk controller's write loops at $F58E,
+// $F5AB and $F5C1 clear V and wait for one falling edge per byte, and none of them
+// touches VIA2 in between, so anything that stretches the line costs them edges. VIA1
+// PA7 is the opposite: the 1571 DOS polls it with the seven-cycle loop at $9456, which
+// at 2 MHz only samples every 3.5 us and steps straight over the bare pulse c1541_gcr
+// emits.
+//
+// So drive them separately. The SO pin and VIA2 CA1 keep the raw pulse, exactly as the
+// 1541 has always seen it, which leaves every write loop untouched at either clock. Only
+// the polled level is stretched, and only where it is read: in 1541 mode drv_mode is zero
+// and PA7 reads back as a constant 1 regardless.
+//
+// Stretch for the polled level: hold for a quarter of the measured byte cell, which is
+// 6.5 to 8 us depending on density zone. That is comfortably longer than the 3.5 us poll
+// period, so the loop cannot miss it, and it still releases well inside the cell. A byte
+// cell is roughly 850 clk cycles at the C128 main clock, so twelve bits hold one with
+// room to spare; the counter saturates rather than wraps, capping the stretch at about
+// one cell if the stream stops before the span completes.
+reg [11:0] byte_span = 0;               // clk cycles since the previous byte-ready
+reg  [9:0] byte_hold = 0;               // cycles left to stretch the polled level
+reg        sector_byte_n_raw_r = 1;
+
 always @(posedge clk) begin
-	if (reset) sector_byte_n_lat <= 1;
-	else if (~sector_byte_n_raw) sector_byte_n_lat <= 0;
-	else if (ted) sector_byte_n_lat <= 1;
+	sector_byte_n_raw_r <= sector_byte_n_raw;
+
+	if (reset) begin
+		byte_span <= 0;
+		byte_hold <= 0;
+	end
+	else if (~sector_byte_n_raw & sector_byte_n_raw_r) begin
+		byte_hold <= byte_span[11:2];
+		byte_span <= 0;
+	end
+	else begin
+		if (~&byte_span) byte_span <= byte_span + 1'b1;
+		// Reading VIA2 means the CPU has taken the byte, so drop the level early,
+		// the same way c157x_h156 does for the MFM path.
+		if (byte_hold) byte_hold <= (ted | ~soe) ? 10'd0 : byte_hold - 1'b1;
+	end
 end
 
-assign byte_n = sector_gcr_enable ? sector_byte_n_lat : h156_byte_n;
+wire sector_byte_n_held = sector_byte_n_raw & ~|byte_hold;
+
+assign byte_n      = sector_gcr_enable ? sector_byte_n_raw  : h156_byte_n;
+assign byte_n_poll = sector_gcr_enable ? sector_byte_n_held : h156_byte_n;
 
 assign     stp    = via2_pb_o[1:0] | ~via2_pb_oe[1:0];
 assign     mtr    = via2_pb_o[2]   | ~via2_pb_oe[2];
