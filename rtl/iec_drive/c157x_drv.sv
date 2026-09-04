@@ -86,7 +86,12 @@ module c157x_drv #(parameter DRIVE)
 	// MEGA65 read-only diagnostics. Words 0-7 are the host-side handshake, sampled in
 	// clk_sys; words 8-15 are DOS state and words 16-63 the serial-bus trace, both from
 	// c157x_logic and sampled in clk. Words 64-111 hold bit-count / VIA1 T1 samples.
-	output logic [2047:0] diag
+	output logic [2047:0] diag,
+
+	// Read-only QNICE monitor access to the DOS work RAM.
+	input         dbg_clk,
+	input  [10:0] dbg_ram_addr,
+	output  [7:0] dbg_ram_data
 );
 
 localparam SD_BLK_CNT_1541 = 31;
@@ -108,7 +113,13 @@ reg        present = 0;
 always @(posedge clk) begin
 
 	if(ce && ch_timeout > 0) ch_timeout <= ch_timeout - 1'd1;
-	if(!ch_timeout) disk_present <= present;
+	// ch_timeout[23] drives the write-protect transitions that tell DOS a disk
+	// changed. Make the image readable at the final transition (01 -> 00 in the
+	// top two counter bits), not only when the remaining quarter of the timeout
+	// reaches zero. Otherwise DOS starts its D71 side-1 probe while the GCR path
+	// is still forced busy by ~disk_present, records a single-sided disk, and
+	// receives no later change indication after data finally becomes available.
+	if(ch_timeout[24:23] == 2'b00) disk_present <= present;
 	disk_ready <= !ch_timeout;
 
 	old_mounted <= img_mounted;
@@ -166,6 +177,10 @@ reg  [6:0] track_num = 36;
 reg  [1:0] move = 0, stp_old = 0;
 reg        side_old = 0;
 wire       drive_enable = disk_present & mtr;
+// Declared ahead of c157x_logic for the same reason as track above: a port connection
+// that names an identifier before its declaration silently becomes an implicit net.
+wire       sd_busy;
+iecdrv_sync busy_sync(clk, busy, sd_busy);
 wire       sector_mode = img_gcr & ~img_mfm;
 // A head bump can step past track 35. The linear sector table only covers a real disk,
 // so clamp before adding the side offset instead of addressing past the end of a D64/D71.
@@ -248,14 +263,15 @@ c157x_logic #(.DRIVE(DRIVE)) c157x_logic
 	.sector_gcr_din(sector_gcr_di),
 	.trk_busy(busy),
 	.trk_num(track_num),
-	.dos_diag(dos_diag)
+	.host_busy(sd_busy),
+	.dos_diag(dos_diag),
+	.dbg_clk(dbg_clk),
+	.dbg_ram_addr(dbg_ram_addr),
+	.dbg_ram_data(dbg_ram_data)
 );
 
 // wire  [7:0] gcr_di;
 // assign      sd_buff_din = /*gcr_mode ? dgcr_sd_buff_dout : gcr_sd_buff_dout*/ dgcr_sd_buff_dout;
-
-wire sd_busy;
-iecdrv_sync busy_sync(clk, busy, sd_busy);
 
 // wire [7:0]  gcr_do, gcr_sd_buff_dout;
 // wire        gcr_sync_n, gcr_byte_n, gcr_we;

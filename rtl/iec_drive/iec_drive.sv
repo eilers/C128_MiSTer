@@ -31,6 +31,11 @@ module iec_drive #(parameter PARPORT=1,DRIVES=2)
    output logic [7:0] out_track[NDR],
    output logic [N:0] out_we,
 
+   // Read-only QNICE monitor access to the 157x DOS work RAM.
+   input         dbg_clk,
+   input  [10:0] dbg_ram_addr,
+   output  [7:0] dbg_ram_data[NDR],
+
    input         iec_atn_i,
    input         iec_data_i,
    input         iec_clk_i,
@@ -200,6 +205,9 @@ c157x_multi #(.PARPORT(PARPORT), .DRIVES(DRIVES)) c157x
 
    .clk_sys(clk_sys),
    .pause(pause),
+   .dbg_clk(dbg_clk),
+   .dbg_ram_addr(dbg_ram_addr),
+   .dbg_ram_data(dbg_ram_data),
 
    // .rom_sel(rom_sel),
    // .rom_addr(rom_addr[14:0]),

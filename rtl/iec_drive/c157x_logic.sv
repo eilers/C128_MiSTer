@@ -75,7 +75,16 @@ module c157x_logic #(DRIVE)
 	// settles stops byte-ready without any of the CPU-side signals looking wrong.
 	input        trk_busy,
 	input  [6:0] trk_num,
-	output [1919:0] dos_diag
+	// Asserted while the host is transferring a track, synchronised to clk.
+	input        host_busy,
+	output [1919:0] dos_diag,
+
+	// Read-only QNICE monitor port for the 2 KiB DOS work RAM. Keeping this on the
+	// RAM's second clock port makes inspection non-intrusive: the 6502 continues on
+	// port A while QNICE reads any location independently.
+	input         dbg_clk,
+	input  [10:0] dbg_ram_addr,
+	output  [7:0] dbg_ram_data
 );
 
 // clock control
@@ -90,9 +99,27 @@ begin
 		accl <= {accl[1:0],accl_ctl};
 end
 
+// A track lives in the host's image file, and the shell copies it into the drive one
+// byte at a time through a 4k window, which costs milliseconds. The sector GCR engine
+// holds its bit clock in reset for all of it, so the DOS sees a gap with no sync marks.
+// After a head step that is harmless, because the DOS expects garbage while the head
+// settles and retries. A side change has no such grace period: on a real 1571 the second
+// head is already over the disk and delivers valid data on the very next byte, so the
+// single-shot side-1 probe in the native initialisation fails and records a 35 track
+// disk. Stop the drive clock for the transfer instead, which costs the DOS no emulated
+// time at all. The bound keeps a host that never answers from freezing the drive
+// permanently: the DOS then sees the gap again and reports a read error as before.
+reg [21:0] host_stall_count = 0;
+wire       host_stall = host_busy & ~&host_stall_count;
+
+always @(posedge clk) begin
+	if (reset | ~host_busy) host_stall_count <= 0;
+	else if (~&host_stall_count) host_stall_count <= host_stall_count + 1'd1;
+end
+
 wire halt  = accl[0]^accl[2];
-wire ena_f = ph2_f[accl[1]] & ~halt;
-wire ena_r = ph2_r[accl[1]] & ~halt;
+wire ena_f = ph2_f[accl[1]] & ~halt & ~host_stall;
+wire ena_r = ph2_r[accl[1]] & ~halt & ~host_stall;
 
 // cpu signal decode
 assign rom_addr = cpu_a[14:0];
@@ -184,13 +211,14 @@ iecdrv_mem #(.DATAWIDTH(8), .ADDRWIDTH(11), .WRITE_B(0)) ram
 	.address_a(cpu_a[10:0]),
 	.data_a(cpu_do),
 	.wren_a(ena_r & ~cpu_rw & ram_cs),
+	.q_a(ram_do),
 
-	// See the note at extram: port B is read-only, so tie its write inputs off.
-	.clock_b(clk),
-	.address_b(cpu_a[10:0]),
+	// QNICE debug reads use the otherwise redundant second RAM port.
+	.clock_b(dbg_clk),
+	.address_b(dbg_ram_addr),
 	.data_b(8'h00),
 	.wren_b(1'b0),
-	.q_b(ram_do)
+	.q_b(dbg_ram_data)
 );
 
 // 8 bytes scratch RAM at $4010-$4017 (1571CR only)
