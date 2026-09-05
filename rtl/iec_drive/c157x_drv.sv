@@ -191,6 +191,7 @@ wire [5:0] raw_blk_cnt = 6'(|drv_mode ? SD_BLK_CNT_157X : SD_BLK_CNT_1541);
 
 wire [7:0] sector_gcr_do, sector_gcr_di, sector_sd_buff_din;
 wire       sector_gcr_sync_n, sector_gcr_byte_n, sector_gcr_we;
+wire       sector_sd_bank;
 wire [7:0] heads_sd_buff_din;
 
 // Crosses from clk into the QNICE read without a synchroniser. Individual words can
@@ -263,7 +264,6 @@ c157x_logic #(.DRIVE(DRIVE)) c157x_logic
 	.sector_gcr_din(sector_gcr_di),
 	.trk_busy(busy),
 	.trk_num(track_num),
-	.host_busy(sd_busy),
 	.dos_diag(dos_diag),
 	.dbg_clk(dbg_clk),
 	.dbg_ram_addr(dbg_ram_addr),
@@ -347,6 +347,7 @@ c1541_gcr sector_gcr
 	.we(sector_gcr_we),
 	.sd_clk(clk_sys),
 	.sd_lba(sd_lba),
+	.sd_bank(sector_sd_bank),
 	.sd_buff_addr(sd_buff_addr[12:0]),
 	.sd_buff_dout(sd_buff_dout),
 	.sd_buff_din(sector_sd_buff_din),
@@ -400,13 +401,15 @@ c157x_track c157x_track
 
 	.freq(freq),
 	.sector_mode(sector_mode),
+	.dual_side(img_ds),
 	.sector_track(sector_track),
 	.raw_blk_cnt(raw_blk_cnt),
 
 	.save_track(save_track),
 	.change(img_mounted),
 	.track(track),
-	.busy(busy)
+	.busy(busy),
+	.sd_bank(sector_sd_bank)
 );
 
 always @(posedge clk) begin

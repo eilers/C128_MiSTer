@@ -17,6 +17,7 @@ module c1541_gcr
 	output reg        we,
 	input             sd_clk,
 	input      [31:0] sd_lba,
+	input             sd_bank,
 	input      [12:0] sd_buff_addr,
 	input       [7:0] sd_buff_dout,
 	output      [7:0] sd_buff_din,
@@ -117,15 +118,21 @@ always @(posedge sd_clk) begin
 	end
 end
 
-iecdrv_mem #(8,13) buffer
+// Keep the sectors under both 1571 heads resident. The generator reads the bank
+// selected by the logical track while the host independently fills or drains the bank
+// belonging to its current request. A side change therefore changes only this bank bit;
+// it never has to wait for QNICE to copy another track into the FPGA.
+wire active_bank = track > 35;
+
+iecdrv_mem #(8,14) buffer
 (
 	.clock_a(sd_clk),
-	.address_a(sd_buff_addr),
+	.address_a({sd_bank,sd_buff_addr}),
 	.data_a(sd_buff_dout),
 	.wren_a(sd_buff_wr),
 	.q_a(sd_buff_din),
 	.clock_b(clk),
-	.address_b(buff_addr),
+	.address_b({active_bank,buff_addr}),
 	.data_b(buff_di),
 	.wren_b(we),
 	.q_b(buff_do)
@@ -134,7 +141,25 @@ iecdrv_mem #(8,13) buffer
 always @(posedge clk) begin
 	hdr_cks <= track ^ sector ^ id1 ^ id2;
 	we <= 0;
-	if (sector > sector_max)
+	// Port B is a registered RAM output. Changing heads changes its bank address,
+	// but the old bank's byte remains on buff_do for one clock and the encoder may
+	// otherwise splice it into a block already in progress. Start a fresh sync and
+	// header on every logical-track change so DOS never sees a mixed-head block.
+	if (old_track != track) begin
+		sync_in_n <= 0;
+		sync_cnt <= 0;
+		state <= 0;
+		sector <= 0;
+		byte_cnt <= 0;
+		nibble <= 0;
+		gcr_bit_cnt <= 0;
+		bit_cnt <= 0;
+		byte_in <= 0;
+		gcr_byte <= 0;
+		data_cks <= 0;
+		mode_r2 <= mode;
+	end
+	else if (sector > sector_max)
 		sector <= 0;
 	else if (bit_clk_en) begin
 		mode_r2 <= mode;

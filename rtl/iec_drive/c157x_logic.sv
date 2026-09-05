@@ -75,8 +75,6 @@ module c157x_logic #(DRIVE)
 	// settles stops byte-ready without any of the CPU-side signals looking wrong.
 	input        trk_busy,
 	input  [6:0] trk_num,
-	// Asserted while the host is transferring a track, synchronised to clk.
-	input        host_busy,
 	output [1919:0] dos_diag,
 
 	// Read-only QNICE monitor port for the 2 KiB DOS work RAM. Keeping this on the
@@ -99,27 +97,9 @@ begin
 		accl <= {accl[1:0],accl_ctl};
 end
 
-// A track lives in the host's image file, and the shell copies it into the drive one
-// byte at a time through a 4k window, which costs milliseconds. The sector GCR engine
-// holds its bit clock in reset for all of it, so the DOS sees a gap with no sync marks.
-// After a head step that is harmless, because the DOS expects garbage while the head
-// settles and retries. A side change has no such grace period: on a real 1571 the second
-// head is already over the disk and delivers valid data on the very next byte, so the
-// single-shot side-1 probe in the native initialisation fails and records a 35 track
-// disk. Stop the drive clock for the transfer instead, which costs the DOS no emulated
-// time at all. The bound keeps a host that never answers from freezing the drive
-// permanently: the DOS then sees the gap again and reports a read error as before.
-reg [21:0] host_stall_count = 0;
-wire       host_stall = host_busy & ~&host_stall_count;
-
-always @(posedge clk) begin
-	if (reset | ~host_busy) host_stall_count <= 0;
-	else if (~&host_stall_count) host_stall_count <= host_stall_count + 1'd1;
-end
-
 wire halt  = accl[0]^accl[2];
-wire ena_f = ph2_f[accl[1]] & ~halt & ~host_stall;
-wire ena_r = ph2_r[accl[1]] & ~halt & ~host_stall;
+wire ena_f = ph2_f[accl[1]] & ~halt;
+wire ena_r = ph2_r[accl[1]] & ~halt;
 
 // cpu signal decode
 assign rom_addr = cpu_a[14:0];
