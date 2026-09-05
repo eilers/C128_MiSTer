@@ -61,18 +61,7 @@ module c1581_fdc1772 (
 	output           out_we,
 
 	// MEGA65 port: disk_present is also the CIA /RDY sense (a disk is inserted).
-	// The remaining dbg_* ports feed the drive-LED colour code in main.vhd.
-	// floppy_ready is the AND of "a disk is in the drive" and "it has reached speed",
-	// so on its own it cannot say which of the two is missing.
-	output           disk_present,
-	output           dbg_spinning,
-	output           dbg_rd,
-	output           dbg_ack,
-	output           dbg_bytes_ok,
-	output           dbg_done,
-	output           dbg_rnf,
-	output           dbg_cpu,
-	output           dbg_idle
+	output           disk_present
 	);
 
 parameter CLK_EN           = 16'd8000; // in kHz
@@ -349,7 +338,6 @@ wire       fd_sector_hdr  = fd_any ? fdn_sector_hdr[fdn]  : 1'b0;
 //wire     fd_sector_data = fd_any ? fdn_sector_data[fdn] : 1'b0;
 wire       fd_dclk_en     = fd_any ? fdn_dclk[fdn]        : 1'b0;
 wire       fd_present     = fd_any ? fdn_present[fdn]     : 1'b0;
-wire       fd_spinning    = fd_any ? fdn_spinning[fdn]    : 1'b0;
 wire       fd_writeprot   = fd_any ? img_wp[fdn]          : 1'b1;
 
 wire       fd_doubleside  = fdn_doubleside[fdn];
@@ -358,47 +346,6 @@ wire [4:0]  fd_spt         = fdn_spt[fdn];
 assign floppy_ready = fd_ready && fd_present;
 
 assign disk_present = fd_present;
-assign dbg_spinning = fd_spinning;
-
-// MEGA65 port: sector-data-path diagnostics for the drive-LED colour code in main.vhd.
-// The DOS gives up within a second or two, long before anyone can read a live signal
-// off an LED, so each stage latches and stays latched until the next mount.
-reg        dbg_rd_seen   = 0;   // the drive asked the host for a sector
-reg        dbg_ack_seen  = 0;   // the host acknowledged the request
-reg        dbg_full      = 0;   // the host walked the whole 512 byte sector buffer
-reg        dbg_xfer_done = 0;   // the FDC clocked a whole sector out to the CPU
-reg        dbg_rnf_seen  = 0;   // ... or gave up with "record not found"
-reg        dbg_cpu_read  = 0;   // the drive CPU fetched at least one byte from it
-reg  [W:0] dbg_mnt_d     = 0;
-always @(posedge clkcpu) begin
-	dbg_mnt_d <= img_mounted;
-	if (~dbg_mnt_d[0] && img_mounted[0]) begin
-		dbg_rd_seen   <= 0;
-		dbg_ack_seen  <= 0;
-		dbg_full      <= 0;
-		dbg_xfer_done <= 0;
-		dbg_rnf_seen  <= 0;
-		dbg_cpu_read  <= 0;
-	end else begin
-		if (cpu_rw_data)                dbg_cpu_read  <= 1;
-		if (|sd_rd)                     dbg_rd_seen   <= 1;
-		if (sd_ack)                     dbg_ack_seen  <= 1;
-		// The QNICE firmware never clears sd_dout_strobe between bytes, so counting
-		// strobes says nothing. Watch the buffer address reach the far end instead.
-		if (sd_ack && sd_buff_addr == 9'd511)
-		                                dbg_full      <= 1;
-		if (data_transfer_done)         dbg_xfer_done <= 1;
-		if (RNF)                        dbg_rnf_seen  <= 1;
-	end
-end
-
-assign dbg_rd       = dbg_rd_seen;
-assign dbg_ack      = dbg_ack_seen;
-assign dbg_bytes_ok = dbg_full;
-assign dbg_done     = dbg_xfer_done;
-assign dbg_rnf      = dbg_rnf_seen;
-assign dbg_cpu      = dbg_cpu_read;
-assign dbg_idle     = sd_io_idle;
 
 // -------------------------------------------------------------------------
 // ----------------------- internal state machines -------------------------

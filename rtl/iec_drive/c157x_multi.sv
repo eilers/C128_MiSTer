@@ -67,14 +67,7 @@ module c157x_multi #(parameter PARPORT=1,DRIVES=2)
 
 	output [14:0] mem_a[NDR],
 	input   [7:0] rom_do[NDR],
-	input   [N:0] empty8k,
-
-	output [2047:0] diag[NDR],
-
-	// Read-only QNICE monitor access to each drive's 2 KiB DOS work RAM.
-	input         dbg_clk,
-	input  [10:0] dbg_ram_addr,
-	output  [7:0] dbg_ram_data[NDR]
+	input   [N:0] empty8k
 );
 
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
@@ -281,10 +274,6 @@ generate
 			.sd_buff_dout(sd_buff_dout),
 			.sd_buff_din(sd_buff_din[i]),
 			.sd_buff_wr(sd_buff_wr),
-			.diag(diag[i]),
-			.dbg_clk(dbg_clk),
-			.dbg_ram_addr(dbg_ram_addr),
-			.dbg_ram_data(dbg_ram_data[i]),
 			.out_track(out_track[i]),
 			.out_we(out_we[i])
 		);

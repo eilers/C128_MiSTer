@@ -26,9 +26,6 @@ module c1581_drv
    output        act_led,
    output        pwr_led,
 
-   // MEGA65 port: drive-LED colour diagnostics, see main.vhd
-   output  [9:0] dbg,
-
    input         iec_atn_i,
    input         iec_data_i,
    input         iec_clk_i,
@@ -254,14 +251,6 @@ wire [7:0] wd_do;
 
 wire floppy_ready;
 wire disk_present;
-wire dbg_spinning;
-wire dbg_rd;
-wire dbg_ack;
-wire dbg_bytes_ok;
-wire dbg_done;
-wire dbg_rnf;
-wire dbg_cpu;
-wire dbg_idle;
 
 c1581_fdc1772 #(.IMG_TYPE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 (
@@ -297,22 +286,8 @@ c1581_fdc1772 #(.IMG_TYPE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
    .out_track(track_fdc),
    .out_we(out_we),
 
-   .disk_present(disk_present),
-   .dbg_spinning(dbg_spinning),
-   .dbg_rd(dbg_rd),
-   .dbg_ack(dbg_ack),
-   .dbg_bytes_ok(dbg_bytes_ok),
-   .dbg_done(dbg_done),
-   .dbg_rnf(dbg_rnf),
-   .dbg_cpu(dbg_cpu),
-   .dbg_idle(dbg_idle)
+   .disk_present(disk_present)
 );
-
-
-// ready chain: present -> motor on -> disk turning -> ready
-// data chain: asked for a sector -> host acked -> a full sector arrived -> sector read out
-assign dbg = {dbg_cpu, dbg_rnf, dbg_done, dbg_bytes_ok, dbg_ack, dbg_rd,
-              floppy_ready, dbg_idle, ~motor_n, disk_present};
 
 assign out_track = {track_fdc[6:0], 1'b0};
 

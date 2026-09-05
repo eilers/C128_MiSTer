@@ -81,17 +81,7 @@ module c157x_drv #(parameter DRIVE)
 	input  [15:0] sd_buff_addr,
 	input   [7:0] sd_buff_dout,
 	output  [7:0] sd_buff_din,
-	input         sd_buff_wr,
-
-	// MEGA65 read-only diagnostics. Words 0-7 are the host-side handshake, sampled in
-	// clk_sys; words 8-15 are DOS state and words 16-63 the serial-bus trace, both from
-	// c157x_logic and sampled in clk. Words 64-111 hold bit-count / VIA1 T1 samples.
-	output logic [2047:0] diag,
-
-	// Read-only QNICE monitor access to the DOS work RAM.
-	input         dbg_clk,
-	input  [10:0] dbg_ram_addr,
-	output  [7:0] dbg_ram_data
+	input         sd_buff_wr
 );
 
 localparam SD_BLK_CNT_1541 = 31;
@@ -194,11 +184,6 @@ wire       sector_gcr_sync_n, sector_gcr_byte_n, sector_gcr_we;
 wire       sector_sd_bank;
 wire [7:0] heads_sd_buff_din;
 
-// Crosses from clk into the QNICE read without a synchroniser. Individual words can
-// therefore be skewed against each other, which is harmless: every field is either a
-// slowly changing mirror or a counter read for its trend, never for an exact value.
-wire [1919:0] dos_diag;
-
 c157x_logic #(.DRIVE(DRIVE)) c157x_logic
 (
 	.clk(clk),
@@ -261,13 +246,7 @@ c157x_logic #(.DRIVE(DRIVE)) c157x_logic
 	.sector_gcr_dout(sector_gcr_do),
 	.sector_gcr_sync_n(sector_gcr_sync_n),
 	.sector_gcr_byte_n(sector_gcr_byte_n),
-	.sector_gcr_din(sector_gcr_di),
-	.trk_busy(busy),
-	.trk_num(track_num),
-	.dos_diag(dos_diag),
-	.dbg_clk(dbg_clk),
-	.dbg_ram_addr(dbg_ram_addr),
-	.dbg_ram_data(dbg_ram_data)
+	.sector_gcr_din(sector_gcr_di)
 );
 
 // wire  [7:0] gcr_di;
@@ -445,44 +424,5 @@ end
 
 assign out_track = track;
 assign out_we = track_modified | sd_wr;
-
-// The diagnostic words are deliberately compact and stable enough to inspect through
-// the QNICE monitor. Event counters make short requests visible without an LED or ILA.
-reg [7:0] diag_rd_count = 0;
-reg [7:0] diag_wr_count = 0;
-reg [7:0] diag_ack_count = 0;
-reg       diag_rd_d = 0;
-reg       diag_wr_d = 0;
-reg       diag_ack_d = 0;
-always @(posedge clk_sys) begin
-	diag_rd_d  <= sd_rd;
-	diag_wr_d  <= sd_wr;
-	diag_ack_d <= sd_ack;
-	if (reset) begin
-		diag_rd_count  <= 0;
-		diag_wr_count  <= 0;
-		diag_ack_count <= 0;
-	end else begin
-		if (sd_rd  & ~diag_rd_d)  diag_rd_count  <= diag_rd_count + 1'd1;
-		if (sd_wr  & ~diag_wr_d)  diag_wr_count  <= diag_wr_count + 1'd1;
-		if (sd_ack & ~diag_ack_d) diag_ack_count <= diag_ack_count + 1'd1;
-	end
-end
-
-always_comb begin
-	diag = '0;
-	diag[15:0]   = 16'h157D; // format/version signature
-	diag[31:16]  = {img_ds, img_gcr, img_mfm, img_readonly, disk_present,
-	                 mtr, act, sd_busy, sd_rd, sd_wr, sd_ack, mode, side,
-	                 drv_mode, reset_drv};
-	diag[47:32]  = {track, sd_buff_addr[7:0]};
-	diag[63:48]  = {diag_rd_count, diag_wr_count};
-	diag[95:64]  = sd_lba;
-	diag[111:96] = {2'b00, sd_blk_cnt, diag_ack_count};
-	// A changing ROM address proves that the drive CPU left reset and is executing
-	// DOS. reset_drv and all host handshakes are already present in the lower words.
-	diag[127:112]= {1'b0, rom_addr};
-	diag[2047:128]= dos_diag;
-end
 
 endmodule

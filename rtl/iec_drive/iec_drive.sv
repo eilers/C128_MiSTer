@@ -24,17 +24,8 @@ module iec_drive #(parameter PARPORT=1,DRIVES=2)
 
    output  [N:0] led,
    output        disk_ready,
-
-   // MEGA65 port: drive-LED colour diagnostics for the 1581, see main.vhd
-   output  [9:0] dbg,
-   output logic [2047:0] diag[NDR],
    output logic [7:0] out_track[NDR],
    output logic [N:0] out_we,
-
-   // Read-only QNICE monitor access to the 157x DOS work RAM.
-   input         dbg_clk,
-   input  [10:0] dbg_ram_addr,
-   output  [7:0] dbg_ram_data[NDR],
 
    input         iec_atn_i,
    input         iec_data_i,
@@ -161,7 +152,6 @@ always_comb for(int i=0; i<NDR; i=i+1) begin
    mem_a[i]       = (img_hd[i] ? c1581_mem_a[i]        : c157x_mem_a[i]        );
    out_track[i]   = (img_hd[i] ? c1581_out_track[i]    : c157x_out_track[i]    );
    out_we[i]      = (img_hd[i] ? c1581_out_we[i]       : c157x_out_we[i]       );
-   diag[i]        = (img_hd[i] ? 2048'b0                : c157x_diag[i]         );
 end
 
 // MEGA65 port: the c1581_* IEC nets are declared here, ahead of the c157x_multi
@@ -177,7 +167,6 @@ wire [31:0] c157x_sd_lba[NDR];
 wire  [N:0] c157x_sd_rd, c157x_sd_wr;
 wire  [5:0] c157x_sd_blk_cnt[NDR];
 wire [14:0] c157x_mem_a[NDR];
-wire [2047:0] c157x_diag[NDR];
 
 c157x_multi #(.PARPORT(PARPORT), .DRIVES(DRIVES)) c157x
 (
@@ -205,9 +194,6 @@ c157x_multi #(.PARPORT(PARPORT), .DRIVES(DRIVES)) c157x
 
    .clk_sys(clk_sys),
    .pause(pause),
-   .dbg_clk(dbg_clk),
-   .dbg_ram_addr(dbg_ram_addr),
-   .dbg_ram_data(dbg_ram_data),
 
    // .rom_sel(rom_sel),
    // .rom_addr(rom_addr[14:0]),
@@ -235,8 +221,7 @@ c157x_multi #(.PARPORT(PARPORT), .DRIVES(DRIVES)) c157x
    .sd_buff_din(c157x_sd_buff_dout),
    .sd_buff_wr(sd_buff_wr),
    .out_track(c157x_out_track),
-   .out_we(c157x_out_we),
-   .diag(c157x_diag)
+   .out_we(c157x_out_we)
 );
 
 
@@ -291,9 +276,7 @@ c1581_multi #(.PARPORT(PARPORT), .DRIVES(DRIVES)) c1581
    .sd_buff_din(c1581_sd_buff_dout),
    .sd_buff_wr(sd_buff_wr),
    .out_track(c1581_out_track),
-   .out_we(c1581_out_we),
-
-   .dbg(dbg)
+   .out_we(c1581_out_we)
 );
 
 endmodule

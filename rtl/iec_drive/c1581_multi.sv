@@ -24,10 +24,6 @@ module c1581_multi #(parameter PARPORT=1,DRIVES=2)
 	output  [N:0] act_led,
 	output  [N:0] pwr_led,
 
-	// MEGA65 port: drive-LED colour diagnostics, see main.vhd. Declared here, ahead of
-	// the generate block below, so the port connection binds to this net.
-	output  [9:0] dbg,
-
 	input         iec_atn_i,
 	input         iec_data_i,
 	input         iec_clk_i,
@@ -148,9 +144,6 @@ wire [N:0] act_led_drv, pwr_led_drv;
 assign     act_led = act_led_drv & ~reset_drv;
 assign     pwr_led = pwr_led_drv & ~reset_drv;
 
-wire [9:0] dbg_drv[NDR];
-assign dbg = dbg_drv[0];
-
 generate
 	genvar i;
 	for(i=0; i<NDR; i=i+1) begin :drives
@@ -199,9 +192,7 @@ generate
 			.sd_buff_din(sd_buff_din[i]),
 			.sd_buff_wr(sd_buff_wr),
 			.out_track(out_track[i]),
-			.out_we(out_we[i]),
-
-			.dbg(dbg_drv[i])
+			.out_we(out_we[i])
 		);
 	end
 endgenerate
