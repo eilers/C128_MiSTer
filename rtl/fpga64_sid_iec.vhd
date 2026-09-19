@@ -237,7 +237,15 @@ port(
    dbg_vic_has_bus_o : out std_logic; -- ILA probe: VIC owns the bus this cycle
    dbg_enable_vic_o  : out std_logic; -- ILA probe: VIC samples fetched data this cycle
    dbg_aec_o         : out std_logic; -- ILA probe: VIC addrValid
-   dbg_vicdi_o       : out unsigned(7 downto 0) -- ILA probe: data presented to the VIC (vicDiAec)
+   dbg_vicdi_o       : out unsigned(7 downto 0); -- ILA probe: data presented to the VIC (vicDiAec)
+   -- Packed MMU snapshot for QNICE device 0106 / ILA (GEOS Panic $D01B).
+   --  7:0 last $FF00 write, 8 iosel, 9 enableMmu, 10 cs_mmuH, 11 cpuWe,
+   -- 12 sticky fetch of $D000-$D02E while iosel=0, 31:16 cpuAddr, 47:32 sticky addr.
+   dbg_mmu_o         : out std_logic_vector(47 downto 0);
+   -- JTAG inject: hold 8502 in reset and return dbg_vec from $FFFC/$FFFD.
+   dbg_t65_reset     : in  std_logic := '0';
+   dbg_vec_en        : in  std_logic := '0';
+   dbg_vec           : in  unsigned(15 downto 0) := x"1C10"
 );
 end fpga64_sid_iec;
 
@@ -281,6 +289,9 @@ signal cpuLatT80    : std_logic;
 signal cpuBusAkT80_n: std_logic;
 
 signal enableMmu    : std_logic;
+signal dbg_last_ff00 : unsigned(7 downto 0) := (others => '0');
+signal dbg_io_fetch_sticky : std_logic := '0';
+signal dbg_io_fetch_addr : unsigned(15 downto 0) := (others => '0');
 signal enableVic    : std_logic;
 signal enableVdc    : std_logic;
 signal enableVdc_sl : std_logic_vector(1 downto 0);
@@ -314,6 +325,7 @@ signal cpuAddr      : unsigned(15 downto 0);
 signal cpuAddr_T65  : unsigned(15 downto 0);
 signal cpuAddr_T80  : unsigned(15 downto 0);
 signal cpuDi        : unsigned(7 downto 0);
+signal cpuDi_t65    : unsigned(7 downto 0);
 signal cpuDo        : unsigned(7 downto 0);
 signal cpuDo_T65    : unsigned(7 downto 0);
 signal cpuDo_T80    : unsigned(7 downto 0);
@@ -417,6 +429,14 @@ signal mmu_z80_n    : std_logic;
 signal mmu_rombank  : unsigned(1 downto 0);
 signal mmu_iosel    : std_logic;
 signal fsdir_n      : std_logic;
+
+attribute mark_debug : string;
+attribute mark_debug of mmu_iosel : signal is "true";
+attribute mark_debug of enableMmu : signal is "true";
+attribute mark_debug of cs_mmuH : signal is "true";
+attribute mark_debug of cpuWe : signal is "true";
+attribute mark_debug of cpuAddr : signal is "true";
+attribute mark_debug of dbg_io_fetch_sticky : signal is "true";
 
 -- Keyboard signals
 signal cpslk_sense_kb  : std_logic;
@@ -1194,19 +1214,23 @@ end process;
 -- -----------------------------------------------------------------------
 cpuIrq_n <= irq_cia1 and irq_vic and irq_n and irq_ext_n;
 
+cpuDi_t65 <= dbg_vec(7 downto 0) when dbg_vec_en = '1' and cpuAddr_T65 = x"FFFC" else
+             dbg_vec(15 downto 8) when dbg_vec_en = '1' and cpuAddr_T65 = x"FFFD" else
+             cpuDi;
+
 cpu_6510: entity work.cpu_6510
 port map (
    mode => not pure64,
 
    clk => clk32,
-   reset => reset,
+   reset => reset or dbg_t65_reset,
    enable => cpuCycT65,
    nmi_n => irq_cia2 and nmi_n,
    nmi_ack => nmi_ack,
    irq_n => cpuIrq_n,
    rdy => not dma_active and cpuActT65 and baLoc and mmu_z80_n,
 
-   di => cpuDi,
+   di => cpuDi_t65,
    addr => cpuAddr_T65,
    do => cpuDo_T65,
    we => cpuWe_T65,
@@ -1389,6 +1413,39 @@ dbg_vic_has_bus_o <= not cpuHasBus;  -- MEGA65 ILA probe: VIC owns the bus (== o
 dbg_enable_vic_o  <= enableVic;
 dbg_aec_o         <= aec;
 dbg_vicdi_o       <= vicDiAec;
+
+process(clk32)
+begin
+   if rising_edge(clk32) then
+      if reset = '1' then
+         dbg_last_ff00 <= (others => '0');
+         dbg_io_fetch_sticky <= '0';
+         dbg_io_fetch_addr <= (others => '0');
+      else
+         if enableMmu = '1' and cpuWe = '1' and cs_mmuH = '1' and cpuAddr(2 downto 0) = "000" then
+            dbg_last_ff00 <= cpuDo;
+         end if;
+         -- cpuCycT65 is high across CYCLE_CPU7; T65 has not yet stepped, so cpuAddr
+         -- is still the instruction that is sampling the bus.
+         if cpuCycT65 = '1' and cpuWe = '0'
+            and cpuAddr(15 downto 8) = x"D0" and cpuAddr(7 downto 0) <= x"2E"
+            and mmu_iosel = '0' then
+            dbg_io_fetch_sticky <= '1';
+            dbg_io_fetch_addr <= cpuAddr;
+         end if;
+      end if;
+   end if;
+end process;
+
+dbg_mmu_o(7 downto 0)   <= std_logic_vector(dbg_last_ff00);
+dbg_mmu_o(8)            <= mmu_iosel;
+dbg_mmu_o(9)            <= enableMmu;
+dbg_mmu_o(10)           <= cs_mmuH;
+dbg_mmu_o(11)           <= cpuWe;
+dbg_mmu_o(12)           <= dbg_io_fetch_sticky;
+dbg_mmu_o(15 downto 13) <= (others => '0');
+dbg_mmu_o(31 downto 16) <= std_logic_vector(cpuAddr);
+dbg_mmu_o(47 downto 32) <= std_logic_vector(dbg_io_fetch_addr);
 
 exrom_mmu <= mmu_exrom;
 game_mmu  <= mmu_game;
