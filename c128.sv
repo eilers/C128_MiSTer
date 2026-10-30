@@ -1488,6 +1488,8 @@ iec_drive iec_drive
    .reset({drive_reset | ((!status[56:55]) ? ~drive_mounted[1] : status[56]),
            drive_reset | ((!status[58:57]) ? ~drive_mounted[0] : status[58])}),
    .drv_mode('{map_drive_model(status[122:121]), map_drive_model(status[120:119])}),
+   .drv_id('{2'd0, 2'd1}),
+   .drv_1581(2'b00),
 
    .ce(drive_ce),
 
