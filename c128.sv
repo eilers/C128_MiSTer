@@ -1530,6 +1530,8 @@ iec_drive iec_drive
    .out_we(drive_we),
 
    .rom_loading(drv_loading),
+   .rom_reload(2'b00),
+   .rom_ready(),
    .rom_req(drive_rom_req),
    .rom_addr(drive_rom_addr),
    .rom_data(sdram_data),
